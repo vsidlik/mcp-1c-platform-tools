@@ -39,6 +39,22 @@ describe("paramsForCommand", () => {
 		assert.ok(!shape.includes("ibConnection"));
 	});
 
+	it("выбор окружения получает environment и обходится без настроек прогона", () => {
+		const shape = keys("1c-platform-tools.env.selectEnvironment");
+		assert.ok(shape.includes("environment"));
+		assert.ok(!shape.includes("profile"));
+		assert.ok(!shape.includes("settingsFile"));
+		assert.ok(!keys("1c-platform-tools.env.selectProfile").includes("environment"));
+	});
+
+	it("прогон пайплайна получает профиль и окружение на этот прогон", () => {
+		const shape = keys("1c-platform-tools.pipelines.run");
+		assert.ok(shape.includes("pipeline"));
+		assert.ok(shape.includes("profile"));
+		assert.ok(shape.includes("environment"));
+		assert.ok(!keys("1c-platform-tools.test.runXUnit").includes("environment"));
+	});
+
 	it("настройка тестов получает frameworks", () => {
 		assert.ok(keys("1c-platform-tools.test.configure").includes("frameworks"));
 	});

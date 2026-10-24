@@ -67,6 +67,13 @@ const profileShape = {
 		.describe("Профиль запуска: идентификатор (dev), имя файла настроек (env.dev.json) или подпись"),
 } as const;
 
+const environmentShape = {
+	environment: z
+		.string()
+		.optional()
+		.describe("Окружение запуска: имя (ci) или файл (.env.ci); пустая строка - по умолчанию, только общие .env и .env.local"),
+} as const;
+
 const frameworksShape = {
 	frameworks: z
 		.array(z.string())
@@ -162,6 +169,20 @@ const pipelineShape = {
 		.describe(
 			"Идентификатор или название цепочки из .1cpt/pipelines.json. " +
 			"Без него команда не выполняется: выбирать цепочку за пользователя нельзя"
+		),
+	profile: z
+		.string()
+		.optional()
+		.describe(
+			"Профиль запуска на этот прогон вместо выбранного в редакторе: идентификатор (dev) или имя файла настроек. " +
+			"Шаги со своим профилем в пайплайне его сохраняют"
+		),
+	environment: z
+		.string()
+		.optional()
+		.describe(
+			"Окружение на этот прогон вместо выбранного в редакторе: имя (ci) или файл (.env.ci); пустая строка - по умолчанию. " +
+			"Шаги со своим окружением в пайплайне его сохраняют"
 		),
 } as const;
 
@@ -365,6 +386,9 @@ export function paramsForCommand(commandId: string): ToolParamsShape {
 	}
 	if (commandId === "1c-platform-tools.env.selectProfile") {
 		Object.assign(shape, profileShape);
+	}
+	if (commandId === "1c-platform-tools.env.selectEnvironment") {
+		Object.assign(shape, environmentShape);
 	}
 	if (commandId === "1c-platform-tools.test.configure") {
 		Object.assign(shape, frameworksShape);
