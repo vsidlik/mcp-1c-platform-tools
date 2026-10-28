@@ -9,10 +9,6 @@
 			"runtimeArgs": ["-y", "tsx", "--inspect-brk", "src/index.ts"],
 			"cwd": "${workspaceFolder:mcp-1c-platform-tools}",
 			"console": "integratedTerminal",
-			"env": {
-				"ONEC_IPC_HOST": "127.0.0.1",
-				"ONEC_IPC_PORT": "40241"
-			},
 			"skipFiles": ["<node_internals>/**"]
 		},
 		{
