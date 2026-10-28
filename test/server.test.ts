@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, CommandGateway, WINDOW_CHANNEL_UNAVAILABLE_HINT } from "../src/server.js";
+import { createMcpServer, CommandGateway } from "../src/server.js";
 import type { CommandDescriptor } from "../src/ipcClient.js";
 import { commandIdToToolName } from "../src/toolName.js";
 
@@ -28,13 +28,14 @@ class FakeGateway implements CommandGateway {
 	constructor(
 		private readonly descriptors: CommandDescriptor[],
 		private readonly result: unknown = { success: true, exitCode: 0, stdout: "готово", stderr: "" },
-		private readonly listFailures = 0
+		private readonly listFailures = 0,
+		private readonly failure = "расширение недоступно"
 	) {}
 
 	public async listCommandDescriptors(): Promise<CommandDescriptor[]> {
 		this.listCalls += 1;
 		if (this.listCalls <= this.listFailures) {
-			throw new Error("расширение недоступно");
+			throw new Error(this.failure);
 		}
 		return this.descriptors;
 	}
@@ -71,8 +72,8 @@ const DESCRIPTORS: CommandDescriptor[] = [
 ];
 
 /** Поднимает сервер с подделкой шлюза и подключает к нему клиента MCP. */
-async function connect(gateway: CommandGateway, unavailableHint?: string): Promise<Client> {
-	const server = await createMcpServer(gateway, "1.2.3", unavailableHint);
+async function connect(gateway: CommandGateway): Promise<Client> {
+	const server = await createMcpServer(gateway, "1.2.3");
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 	const client = new Client({ name: "test", version: "1" });
 	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -138,6 +139,8 @@ describe("createMcpServer", () => {
 		const instructions = client.getInstructions() ?? "";
 		assert.ok(instructions.includes(commandIdToToolName("1c-platform-tools.env.status")), instructions);
 		assert.match(instructions, /wait: false/);
+		assert.match(instructions, /WORKSPACE_MISMATCH/, "агент должен знать, что проект другого окна отклоняется");
+		assert.match(instructions, /WINDOW_NOT_FOUND/, "агент должен знать, что делать без окна с проектом");
 		await client.close();
 	});
 
@@ -277,19 +280,16 @@ describe("createMcpServer", () => {
 		await client.close();
 	});
 
-	it("заглушка подсказывает, что делать, по каналу подключения", async () => {
-		const tcp = await connect(new FakeGateway(DESCRIPTORS, undefined, 99));
-		const tcpAnswer = await tcp.callTool({ name: "onec_platform_tools_status", arguments: {} });
-		assert.strictEqual(tcpAnswer.isError, true);
-		assert.match(JSON.stringify(tcpAnswer.content), /ipc\.enabled/);
-		await tcp.close();
+	it("заглушка называет причину, по которой окно недоступно", async () => {
+		const reason = "Нет окон VS Code или Cursor с 1C: Platform Tools. Откройте проект 1С и повторите вызов (код: WINDOW_NOT_FOUND)";
+		const client = await connect(new FakeGateway(DESCRIPTORS, undefined, 99, reason));
 
-		const window = await connect(new FakeGateway(DESCRIPTORS, undefined, 99), WINDOW_CHANNEL_UNAVAILABLE_HINT);
-		const windowAnswer = await window.callTool({ name: "onec_platform_tools_status", arguments: {} });
-		assert.strictEqual(windowAnswer.isError, true);
-		assert.match(JSON.stringify(windowAnswer.content), /перезапустите MCP-сервер/);
-		assert.doesNotMatch(JSON.stringify(windowAnswer.content), /ipc\.enabled/);
-		await window.close();
+		const answer = await client.callTool({ name: "onec_platform_tools_status", arguments: {} });
+
+		assert.strictEqual(answer.isError, true);
+		assert.match(JSON.stringify(answer.content), /WINDOW_NOT_FOUND/);
+		assert.doesNotMatch(JSON.stringify(answer.content), /ipc\.enabled/);
+		await client.close();
 	});
 
 	it("заглушка регистрирует инструменты после повторного подключения", async () => {

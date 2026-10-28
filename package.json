@@ -44,6 +44,11 @@
         "command": "mcp-1c-platform-tools.configureCursor",
         "title": "Настроить MCP для Cursor (.cursor/mcp.json)",
         "category": "1C: Platform Tools MCP"
+      },
+      {
+        "command": "mcp-1c-platform-tools.configureClaudeCode",
+        "title": "Настроить MCP для Claude Code (.mcp.json)",
+        "category": "1C: Platform Tools MCP"
       }
     ]
   },

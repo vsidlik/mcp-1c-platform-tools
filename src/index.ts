@@ -1,11 +1,12 @@
 /**
- * Точка входа MCP-сервера (stdio): подключает клиента IPC к сборке сервера.
+ * Точка входа MCP-сервера (stdio): подключает окна 1C: Platform Tools к сборке сервера.
  * Список инструментов и обработка вызовов живут в server.ts.
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { IpcClient } from "./ipcClient.js";
 import { logger } from "./loggerServer.js";
-import { createMcpServer, TCP_UNAVAILABLE_HINT, WINDOW_CHANNEL_UNAVAILABLE_HINT } from "./server.js";
+import { createMcpServer } from "./server.js";
+import { agentContextFrom } from "./windowChoice.js";
+import { WindowGateway } from "./windowGateway.js";
 
 /**
  * Возвращает версию MCP-сервера из переменной окружения или «0.0.0».
@@ -20,9 +21,8 @@ function getServerVersion(): string {
  * Поднимает сервер и подключает stdio-транспорт.
  */
 async function main(): Promise<void> {
-	// Канал окна передаёт VS Code, TCP-канал включают в настройках
-	const hint = process.env.ONEC_IPC_PIPE?.trim() ? WINDOW_CHANNEL_UNAVAILABLE_HINT : TCP_UNAVAILABLE_HINT;
-	const server = await createMcpServer(new IpcClient(), getServerVersion(), hint);
+	const gateway = new WindowGateway(agentContextFrom(process.env, process.cwd()));
+	const server = await createMcpServer(gateway, getServerVersion());
 	await server.connect(new StdioServerTransport());
 	logger.info("MCP-сервер 1C Platform Tools запущен (stdio)");
 }

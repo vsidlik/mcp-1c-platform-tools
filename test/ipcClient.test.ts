@@ -1,314 +1,85 @@
 /**
- * Тесты IpcClient: конфигурация и вызов request через фейковый TCP-сервер и канал окна.
+ * Тесты IpcClient: вызовы по каналу окна (Unix-сокет или именованный канал Windows).
  */
 import * as fs from "node:fs";
 import * as net from "node:net";
-import * as os from "node:os";
-import * as path from "node:path";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
-import { IpcClient, type IpcClientConfig } from "../src/ipcClient.js";
+import { IpcClient, IpcError } from "../src/ipcClient.js";
+import { channelPath, startChannel, type FakeChannel } from "./helpers/fakeWindow.js";
 
-describe("IpcClient", () => {
-	describe("constructor", () => {
-		it("использует переданную конфигурацию", () => {
-			const config: IpcClientConfig = {
-				host: "10.0.0.1",
-				port: 9999,
-				token: "secret",
-				timeoutMs: 1000,
-			};
-			const client = new IpcClient(config);
-			assert.ok(client instanceof IpcClient);
-		});
+describe("IpcClient: запросы по каналу окна", () => {
+	let channel: FakeChannel;
 
-		it("принимает частичную конфигурацию (порт по умолчанию 40241)", () => {
-			const client = new IpcClient({ host: "127.0.0.1" });
-			assert.ok(client instanceof IpcClient);
-		});
-	});
-
-	describe("request (с фейковым TCP-сервером)", () => {
-		let server: net.Server;
-		let serverPort: number;
-
-		before(() => {
-			return new Promise<void>((resolve) => {
-				server = net.createServer((socket) => {
-					socket.on("data", (data: Buffer) => {
-						const payload = JSON.stringify({
-							id: null,
-							result: { value: 42 },
-						});
-						socket.write(payload + "\n");
-						socket.end();
-					});
-				});
-				server.listen(0, "127.0.0.1", () => {
-					const addr = server.address();
-					serverPort = typeof addr === "object" && addr?.port ? addr.port : 0;
-					resolve();
-				});
-			});
-		});
-
-		after(() => {
-			return new Promise<void>((resolve) => {
-				server.close(() => resolve());
-			});
-		});
-
-		it("возвращает result из ответа сервера", async () => {
-			const client = new IpcClient({
-				host: "127.0.0.1",
-				port: serverPort,
-				timeoutMs: 5000,
-			});
-			const result = await client.request<{ value: number }>("test", {});
-			assert.strictEqual(result?.value, 42);
+	before(async () => {
+		channel = await startChannel((request) => {
+			if (request.method === "listCommands") {
+				return { result: { commands: ["cmd.a", "cmd.b"] } };
+			}
+			if (request.method === "executeCommand") {
+				return request.params?.commandId === "cmd.fail"
+					? { result: { ok: false, message: "Команда не выполнена" } }
+					: { result: { ok: true, commandResult: "done" } };
+			}
+			return { result: { value: 42 } };
 		});
 	});
 
-	describe("request — кириллица на стыке порций", () => {
-		let server: net.Server;
-		let serverPort: number;
-		const name = "РегистрСведений.ДополнительныеАдресныеСведения";
+	after(() => channel.close());
 
-		before(() => {
-			return new Promise<void>((resolve) => {
-				server = net.createServer((socket) => {
-					socket.on("data", () => {
-						const bytes = Buffer.from(`${JSON.stringify({ id: null, result: { name } })}\n`, "utf8");
-						// Рвём ответ посреди двухбайтовой буквы: так его бывает режет сокет
-						const cut = bytes.indexOf(Buffer.from("н", "utf8")) + 1;
-						socket.write(bytes.subarray(0, cut));
-						setTimeout(() => {
-							socket.write(bytes.subarray(cut));
-							socket.end();
-						}, 20);
-					});
-				});
-				server.listen(0, "127.0.0.1", () => {
-					const addr = server.address();
-					serverPort = typeof addr === "object" && addr?.port ? addr.port : 0;
-					resolve();
-				});
-			});
-		});
-
-		after(() => {
-			return new Promise<void>((resolve) => {
-				server.close(() => resolve());
-			});
-		});
-
-		it("буква, разорванная между порциями, не портится", async () => {
-			const client = new IpcClient({ host: "127.0.0.1", port: serverPort, timeoutMs: 5000 });
-			const result = await client.request<{ name: string }>("test", {});
-			assert.strictEqual(result?.name, name);
-		});
+	it("возвращает result из ответа и передаёт токен канала", async () => {
+		const client = new IpcClient({ pipe: channel.pipe, token: "сессия", timeoutMs: 5000 });
+		const result = await client.request<{ value: number }>("test", {});
+		assert.strictEqual(result?.value, 42);
+		assert.strictEqual(channel.requests.at(-1)?.token, "сессия");
 	});
 
-	describe("request — ответ с error", () => {
-		let server: net.Server;
-		let serverPort: number;
-
-		before(() => {
-			return new Promise<void>((resolve) => {
-				server = net.createServer((socket) => {
-					socket.on("data", () => {
-						const payload = JSON.stringify({
-							id: null,
-							error: { message: "Ошибка сервера", code: "ERR" },
-						});
-						socket.write(payload + "\n");
-						socket.end();
-					});
-				});
-				server.listen(0, "127.0.0.1", () => {
-					const addr = server.address();
-					serverPort = typeof addr === "object" && addr?.port ? addr.port : 0;
-					resolve();
-				});
-			});
-		});
-
-		after(() => {
-			return new Promise<void>((resolve) => {
-				server.close(() => resolve());
-			});
-		});
-
-		it("отклоняет промис с сообщением и кодом ошибки", async () => {
-			const client = new IpcClient({
-				host: "127.0.0.1",
-				port: serverPort,
-				timeoutMs: 5000,
-			});
-			await assert.rejects(
-				async () => client.request("test"),
-				(err: Error) => err.message.includes("Ошибка сервера") && err.message.includes("ERR")
-			);
-		});
+	it("listCommands возвращает массив command ID", async () => {
+		const client = new IpcClient({ pipe: channel.pipe, token: "t", timeoutMs: 5000 });
+		assert.deepStrictEqual(await client.listCommands(), ["cmd.a", "cmd.b"]);
 	});
 
-	describe("executeCommand и listCommands (через фейковый сервер)", () => {
-		let server: net.Server;
-		let serverPort: number;
-
-		before(() => {
-			return new Promise<void>((resolve) => {
-				server = net.createServer((socket) => {
-					socket.on("data", (data: Buffer) => {
-						const req = JSON.parse(data.toString().split("\n")[0]);
-						const method = req.method;
-						const id = req.id;
-						let result: unknown;
-						if (method === "listCommands") {
-							result = { commands: ["cmd.a", "cmd.b"] };
-						} else if (method === "executeCommand") {
-							result = { ok: true, commandResult: "done" };
-						} else {
-							result = null;
-						}
-						socket.write(JSON.stringify({ id, result }) + "\n");
-						socket.end();
-					});
-				});
-				server.listen(0, "127.0.0.1", () => {
-					const addr = server.address();
-					serverPort = typeof addr === "object" && addr?.port ? addr.port : 0;
-					resolve();
-				});
-			});
-		});
-
-		after(() => {
-			return new Promise<void>((resolve) => {
-				server.close(() => resolve());
-			});
-		});
-
-		it("listCommands возвращает массив command ID", async () => {
-			const client = new IpcClient({
-				host: "127.0.0.1",
-				port: serverPort,
-				timeoutMs: 5000,
-			});
-			const commands = await client.listCommands();
-			assert.deepStrictEqual(commands, ["cmd.a", "cmd.b"]);
-		});
-
-		it("executeCommand возвращает commandResult при ok: true", async () => {
-			const client = new IpcClient({
-				host: "127.0.0.1",
-				port: serverPort,
-				timeoutMs: 5000,
-			});
-			const result = await client.executeCommand("cmd.a", [], "/path");
-			assert.strictEqual(result, "done");
-		});
-
-		it("executeCommand принимает явный timeoutMs", async () => {
-			const client = new IpcClient({
-				host: "127.0.0.1",
-				port: serverPort,
-				timeoutMs: 5000,
-			});
-			// Увеличенный таймаут для wait-сценария — команда должна выполниться штатно
-			const result = await client.executeCommand("cmd.a", [{ wait: true }], "/path", 300_000);
-			assert.strictEqual(result, "done");
-		});
+	it("executeCommand передаёт команду и путь проекта и возвращает commandResult", async () => {
+		const client = new IpcClient({ pipe: channel.pipe, token: "t", timeoutMs: 5000 });
+		// Увеличенный таймаут для wait-сценария — команда должна выполниться штатно
+		const result = await client.executeCommand("cmd.a", [{ wait: true }], "/path", 300_000);
+		assert.strictEqual(result, "done");
+		assert.deepStrictEqual(channel.requests.at(-1)?.params, { commandId: "cmd.a", args: [{ wait: true }], projectPath: "/path" });
 	});
 
-	describe("executeCommand — ok: false", () => {
-		let server: net.Server;
-		let serverPort: number;
-
-		before(() => {
-			return new Promise<void>((resolve) => {
-				server = net.createServer((socket) => {
-					socket.on("data", (data: Buffer) => {
-						const req = JSON.parse(data.toString().split("\n")[0]);
-						const payload = JSON.stringify({
-							id: req.id,
-							result: {
-								ok: false,
-								message: "Команда не выполнена",
-							},
-						});
-						socket.write(payload + "\n");
-						socket.end();
-					});
-				});
-				server.listen(0, "127.0.0.1", () => {
-					const addr = server.address();
-					serverPort = typeof addr === "object" && addr?.port ? addr.port : 0;
-					resolve();
-				});
-			});
-		});
-
-		after(() => {
-			return new Promise<void>((resolve) => {
-				server.close(() => resolve());
-			});
-		});
-
-		it("выбрасывает Error с сообщением сервера", async () => {
-			const client = new IpcClient({
-				host: "127.0.0.1",
-				port: serverPort,
-				timeoutMs: 5000,
-			});
-			await assert.rejects(
-				async () => client.executeCommand("x", [], "/p"),
-				(err: Error) => err.message === "Команда не выполнена"
-			);
-		});
+	it("executeCommand при ok: false выбрасывает Error с сообщением расширения", async () => {
+		const client = new IpcClient({ pipe: channel.pipe, token: "t", timeoutMs: 5000 });
+		await assert.rejects(
+			async () => client.executeCommand("cmd.fail", [], "/p"),
+			(err: Error) => err.message === "Команда не выполнена"
+		);
 	});
 });
 
-describe("request — подробности ошибки", () => {
-	let server: net.Server;
-	let serverPort: number;
+describe("IpcClient: отказ расширения", () => {
+	let channel: FakeChannel;
 
-	before(() => {
-		return new Promise<void>((resolve) => {
-			server = net.createServer((socket) => {
-				socket.on("data", () => {
-					socket.write(
-						JSON.stringify({
-							id: null,
-							error: {
-								message: "Путь projectPath не совпадает с текущей рабочей областью VS Code",
-								code: "WORKSPACE_MISMATCH",
-								details: { projectPath: "C:/wrong", workspaceRoots: ["C:/work/erp"] },
-							},
-						}) + "\n"
-					);
-					socket.end();
-				});
-			});
-			server.listen(0, "127.0.0.1", () => {
-				const addr = server.address();
-				serverPort = typeof addr === "object" && addr?.port ? addr.port : 0;
-				resolve();
-			});
-		});
+	before(async () => {
+		channel = await startChannel(() => ({
+			error: {
+				message: "Путь projectPath лежит вне папок рабочей области этого окна",
+				code: "WORKSPACE_MISMATCH",
+				details: { projectPath: "C:/wrong", workspaceRoots: ["C:/work/erp"] },
+			},
+		}));
 	});
 
-	after(() => {
-		return new Promise<void>((resolve) => server.close(() => resolve()));
-	});
+	after(() => channel.close());
 
-	it("каталоги рабочей области попадают в сообщение", async () => {
-		const client = new IpcClient({ host: "127.0.0.1", port: serverPort, token: null, timeoutMs: 2000 });
-
+	it("сообщение, код и подробности попадают в ошибку", async () => {
+		const client = new IpcClient({ pipe: channel.pipe, token: "t", timeoutMs: 2000 });
 		await assert.rejects(
 			() => client.request("executeCommand"),
-			(error: Error) => {
-				assert.match(error.message, /WORKSPACE_MISMATCH/);
+			(error: unknown) => {
+				assert.ok(error instanceof IpcError);
+				assert.strictEqual(error.code, "WORKSPACE_MISMATCH");
+				assert.strictEqual(error.reason, "Путь projectPath лежит вне папок рабочей области этого окна");
+				assert.match(error.message, /\(код: WORKSPACE_MISMATCH\)/);
 				assert.match(error.message, /C:\/work\/erp/);
 				return true;
 			}
@@ -316,63 +87,56 @@ describe("request — подробности ошибки", () => {
 	});
 });
 
-describe("request — канал окна", () => {
+describe("IpcClient: кириллица на стыке порций", () => {
+	const name = "РегистрСведений.ДополнительныеАдресныеСведения";
 	let server: net.Server;
-	let dir: string | undefined;
 	let pipe: string;
+	let dir: string | undefined;
 
 	before(() => {
-		// Так канал окна открывает расширение: именованный канал Windows или Unix-сокет
-		if (process.platform === "win32") {
-			pipe = `\\\\.\\pipe\\mcp-1c-platform-tools-test-${process.pid}`;
-		} else {
-			dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-1cpt-"));
-			pipe = path.join(dir, "ipc.sock");
-		}
-		return new Promise<void>((resolve) => {
-			server = net.createServer((socket) => {
-				socket.on("data", (data: Buffer) => {
-					const req = JSON.parse(data.toString().split("\n")[0]);
-					socket.end(`${JSON.stringify({ id: req.id, result: { method: req.method, token: req.token } })}\n`);
-				});
+		({ pipe, dir } = channelPath());
+		server = net.createServer((socket) => {
+			socket.on("data", () => {
+				const bytes = Buffer.from(`${JSON.stringify({ id: null, result: { name } })}\n`, "utf8");
+				// Рвём ответ посреди двухбайтовой буквы: так его бывает режет сокет
+				const cut = bytes.indexOf(Buffer.from("н", "utf8")) + 1;
+				socket.write(bytes.subarray(0, cut));
+				setTimeout(() => {
+					socket.write(bytes.subarray(cut));
+					socket.end();
+				}, 20);
 			});
-			server.listen(pipe, () => resolve());
 		});
+		return new Promise<void>((resolve) => server.listen(pipe, () => resolve()));
 	});
 
 	after(() => {
-		return new Promise<void>((resolve) => {
+		return new Promise<void>((resolve) =>
 			server.close(() => {
 				if (dir) {
 					fs.rmSync(dir, { recursive: true, force: true });
 				}
 				resolve();
-			});
-		});
+			})
+		);
 	});
 
-	it("с путём канала хост и порт не используются", async () => {
-		// Порт 1 никто не слушает: ответ возможен только из канала
-		const client = new IpcClient({ pipe, host: "127.0.0.1", port: 1, token: "сессия", timeoutMs: 5000 });
-		const result = await client.request<{ method: string; token: string }>("ping");
-		assert.deepStrictEqual(result, { method: "ping", token: "сессия" });
+	it("буква, разорванная между порциями, не портится", async () => {
+		const client = new IpcClient({ pipe, token: "t", timeoutMs: 5000 });
+		const result = await client.request<{ name: string }>("test", {});
+		assert.strictEqual(result?.name, name);
 	});
+});
 
-	it("путь канала и токен берутся из ONEC_IPC_PIPE и ONEC_IPC_TOKEN", async () => {
-		const saved = { pipe: process.env.ONEC_IPC_PIPE, token: process.env.ONEC_IPC_TOKEN };
-		process.env.ONEC_IPC_PIPE = pipe;
-		process.env.ONEC_IPC_TOKEN = "из окружения";
+describe("IpcClient: окно не слушает", () => {
+	it("ошибка подключения говорит, что окно недоступно", async () => {
+		const { pipe, dir } = channelPath();
 		try {
-			const client = new IpcClient({ timeoutMs: 5000 });
-			const result = await client.request<{ method: string; token: string }>("listCommands");
-			assert.deepStrictEqual(result, { method: "listCommands", token: "из окружения" });
+			const client = new IpcClient({ pipe, token: "t", timeoutMs: 2000 });
+			await assert.rejects(() => client.request("ping"), /Не удалось подключиться к окну 1C: Platform Tools/);
 		} finally {
-			for (const [name, value] of [["ONEC_IPC_PIPE", saved.pipe], ["ONEC_IPC_TOKEN", saved.token]] as const) {
-				if (value === undefined) {
-					delete process.env[name];
-				} else {
-					process.env[name] = value;
-				}
+			if (dir) {
+				fs.rmSync(dir, { recursive: true, force: true });
 			}
 		}
 	});

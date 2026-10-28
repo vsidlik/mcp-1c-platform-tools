@@ -18,13 +18,6 @@ import { paramsForCommand } from "./toolParams.js";
  */
 export const TIMEOUT_DEFAULT_MS = 60_000;
 
-/** Что сделать, если расширение недоступно по TCP-каналу (Cursor и внешние клиенты). */
-export const TCP_UNAVAILABLE_HINT =
-	"Откройте VS Code с проектом 1С и включите настройку 1c-platform-tools.ipc.enabled.";
-
-/** Что сделать, если недоступен канал окна VS Code: адрес канала сервер получил при запуске. */
-export const WINDOW_CHANNEL_UNAVAILABLE_HINT = "Канал окна VS Code недоступен: перезапустите MCP-сервер.";
-
 /**
  * Таймаут синхронных команд (мс).
  *
@@ -36,7 +29,7 @@ export function readWaitTimeout(): number {
 	return Number.isFinite(raw) && raw > 0 ? raw : 1_800_000;
 }
 
-/** Источник команд расширения: в работе это IPC-клиент, в тестах подделка. */
+/** Источник команд расширения: в работе это окна 1C: Platform Tools, в тестах подделка. */
 export interface CommandGateway {
 	/** Список команд расширения с заголовками. */
 	listCommandDescriptors(): Promise<CommandDescriptor[]>;
@@ -70,7 +63,9 @@ type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: bo
  * инициализации сервера. Без него правила приходится выяснять по ошибкам.
  */
 export const SERVER_INSTRUCTIONS = [
-	"Инструменты выполняют команды расширения 1C: Platform Tools в открытом VS Code: тесты, сборка конфигурации и расширений, работа с информационной базой, профили запуска.",
+	"Инструменты выполняют команды расширения 1C: Platform Tools в открытом окне VS Code или Cursor: тесты, сборка конфигурации и расширений, работа с информационной базой, профили запуска.",
+	"",
+	"Вызовы идут в окно, из которого запущен агент. Проект другого окна оно отклоняет с кодом WORKSPACE_MISMATCH и называет окно, где проект открыт. Агенту вне окон, например Claude Code в терминале, окно выбирается по projectPath. Если проект не открыт ни в одном окне (WINDOW_NOT_FOUND), откройте его в VS Code или Cursor (code <путь> или cursor <путь>) и повторите вызов.",
 	"",
 	"Начинайте с env_status: он покажет активный профиль запуска, файл настроек, версию vanessa-runner и строку подключения к ИБ. От окружения зависит, куда попадут изменения.",
 	"",
@@ -138,15 +133,9 @@ export async function runTool(
  *
  * @param gateway — источник команд расширения
  * @param version — версия сервера для ответа initialize
- * @param unavailableHint — что сделать, если расширение недоступно; зависит от
- *   канала, по которому сервер к нему подключается
  * @returns готовый сервер (транспорт подключает вызывающая сторона)
  */
-export async function createMcpServer(
-	gateway: CommandGateway,
-	version: string,
-	unavailableHint = TCP_UNAVAILABLE_HINT
-): Promise<McpServer> {
+export async function createMcpServer(gateway: CommandGateway, version: string): Promise<McpServer> {
 	const server = new McpServer(
 		{ name: "mcp-1c-platform-tools", version },
 		{ capabilities: { tools: { listChanged: true } }, instructions: SERVER_INSTRUCTIONS }
@@ -187,8 +176,8 @@ export async function createMcpServer(
 		descriptors = await gateway.listCommandDescriptors();
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		logger.warn(`Не удалось получить список команд по IPC: ${message}. ${unavailableHint}`);
-		registerPlaceholder(server, gateway, registerTools, usedNames, unavailableHint);
+		logger.warn(`Не удалось получить список команд: ${message}`);
+		registerPlaceholder(server, gateway, registerTools, usedNames);
 	}
 
 	const count = registerTools(descriptors);
@@ -206,14 +195,12 @@ export async function createMcpServer(
  * @param gateway — источник команд расширения
  * @param registerTools — регистрация инструментов по описаниям команд
  * @param usedNames — занятые имена инструментов
- * @param unavailableHint — что сделать, если расширение недоступно
  */
 function registerPlaceholder(
 	server: McpServer,
 	gateway: CommandGateway,
 	registerTools: (descriptors: CommandDescriptor[]) => number,
-	usedNames: Set<string>,
-	unavailableHint: string
+	usedNames: Set<string>
 ): void {
 	usedNames.add("onec_platform_tools_status");
 	const placeholder = server.registerTool(
@@ -224,6 +211,7 @@ function registerPlaceholder(
 				"Вызовите, если инструментов 1С не видно: сервер повторит подключение.",
 		},
 		async (): Promise<ToolResult> => {
+			let reason: string;
 			try {
 				const late = await gateway.listCommandDescriptors();
 				const added = registerTools(late);
@@ -239,15 +227,16 @@ function registerPlaceholder(
 						],
 					};
 				}
+				reason = "окно отозвалось, но новых команд не дало";
 			} catch (retryError) {
-				const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
-				logger.warn(`Повторное подключение по IPC не удалось: ${retryMessage}`);
+				reason = retryError instanceof Error ? retryError.message : String(retryError);
+				logger.warn(`Повторное подключение не удалось: ${reason}`);
 			}
 			return {
 				content: [
 					{
 						type: "text",
-						text: `Расширение 1c-platform-tools недоступно по IPC. ${unavailableHint}`,
+						text: `Нет связи с 1C: Platform Tools: ${reason}`,
 					},
 				],
 				isError: true,

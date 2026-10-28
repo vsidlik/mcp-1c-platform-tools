@@ -1,8 +1,7 @@
 /**
- * Клиент IPC-сервера расширения 1c-platform-tools (JSON-RPC over newline-delimited JSON).
- * Подключается к каналу окна (именованный канал или Unix-сокет из ONEC_IPC_PIPE),
- * а без него — к TCP-каналу. Используется standalone MCP-процессом для listCommands
- * и executeCommand.
+ * Клиент канала окна расширения 1c-platform-tools (JSON-RPC over newline-delimited JSON).
+ * Канал — именованный канал Windows или Unix-сокет окна, адрес и токен берутся из
+ * реестра окон. Используется standalone MCP-процессом для listCommands и executeCommand.
  */
 import * as net from "node:net";
 import { StringDecoder } from "node:string_decoder";
@@ -48,14 +47,31 @@ function formatErrorDetails(details: unknown): string {
 	}
 }
 
-/** Настройки подключения к IPC-серверу (канал окна или хост и порт, токен, таймаут). */
+/** Настройки подключения к каналу окна. */
 export interface IpcClientConfig {
-	host: string;
-	port: number;
-	/** Путь канала окна; если задан, хост и порт не используются. */
-	pipe?: string;
-	token: string | null;
-	timeoutMs: number;
+	/** Путь именованного канала Windows или Unix-сокета окна. */
+	pipe: string;
+	/** Токен канала окна. */
+	token: string;
+	/** Таймаут ответа по умолчанию (мс). */
+	timeoutMs?: number;
+}
+
+/** Отказ с кодом: текст ошибки для агента собирается из причины, кода и подробностей. */
+export class IpcError extends Error {
+	/**
+	 * @param reason — что случилось и что сделать
+	 * @param code — код отказа, например WORKSPACE_MISMATCH
+	 * @param details — подробности отказа
+	 */
+	constructor(
+		readonly reason: string,
+		readonly code?: string,
+		readonly details?: unknown
+	) {
+		super((code ? `${reason} (код: ${code})` : reason) + formatErrorDetails(details));
+		this.name = "IpcError";
+	}
 }
 
 /** Тело запроса к IPC-серверу. */
@@ -78,39 +94,16 @@ interface IpcResponsePayload {
 }
 
 /**
- * Клиент для вызова методов расширения 1c-platform-tools по IPC.
- * Параметры по умолчанию берутся из env: ONEC_IPC_PIPE, ONEC_IPC_HOST, ONEC_IPC_PORT, ONEC_IPC_TOKEN.
+ * Клиент для вызова методов расширения 1c-platform-tools по каналу окна.
  */
 export class IpcClient {
-	private readonly config: IpcClientConfig;
-	/** Куда идут запросы: путь канала окна или хост и порт. */
-	private readonly target: string;
+	private readonly timeoutMs: number;
 
 	/**
-	 * Создаёт клиент с переданной конфигурацией или значениями из переменных окружения.
-	 *
-	 * @param config — частичная конфигурация (хост, порт, токен, timeoutMs)
+	 * @param config — путь канала окна, токен и таймаут
 	 */
-	constructor(config?: Partial<IpcClientConfig>) {
-		const portEnv = Number.parseInt(process.env.ONEC_IPC_PORT ?? "", 10);
-		let port: number;
-		const configPort = config?.port;
-		if (Number.isFinite(configPort) && (configPort ?? 0) > 0) {
-			port = configPort as number;
-		} else if (Number.isFinite(portEnv) && portEnv > 0) {
-			port = portEnv;
-		} else {
-			port = 40241;
-		}
-		const pipeEnv = process.env.ONEC_IPC_PIPE?.trim();
-		this.config = {
-			host: config?.host ?? process.env.ONEC_IPC_HOST ?? "127.0.0.1",
-			port,
-			pipe: config?.pipe ?? (pipeEnv || undefined),
-			token: config?.token ?? process.env.ONEC_IPC_TOKEN ?? null,
-			timeoutMs: config?.timeoutMs ?? 60_000,
-		};
-		this.target = this.config.pipe ?? `${this.config.host}:${this.config.port}`;
+	constructor(private readonly config: IpcClientConfig) {
+		this.timeoutMs = config.timeoutMs ?? 60_000;
 	}
 
 	/**
@@ -131,15 +124,12 @@ export class IpcClient {
 			id,
 			method,
 			params,
+			token: this.config.token,
 		};
 
-		if (this.config.token) {
-			payload.token = this.config.token;
-		}
-
 		const message = `${JSON.stringify(payload)}\n`;
-		const effectiveTimeout = timeoutMs ?? this.config.timeoutMs;
-		logger.debug(`IPC: запрос ${method} (id ${id}) → ${this.target} (таймаут ${effectiveTimeout} мс)`);
+		const effectiveTimeout = timeoutMs ?? this.timeoutMs;
+		logger.debug(`IPC: запрос ${method} (id ${id}) → ${this.config.pipe} (таймаут ${effectiveTimeout} мс)`);
 
 		return new Promise<T>((resolve, reject) => {
 			const socket = new net.Socket();
@@ -162,10 +152,10 @@ export class IpcClient {
 					error instanceof Error
 						? error
 						: new Error("Неизвестная ошибка IPC-клиента");
-				logger.error(`IPC: подключение ${this.target} — ${err.message}`);
+				logger.error(`IPC: подключение ${this.config.pipe} — ${err.message}`);
 				reject(
 					new Error(
-						`Не удалось подключиться к расширению 1c-platform-tools по IPC: ${err.message}`
+						`Не удалось подключиться к окну 1C: Platform Tools: ${err.message}`
 					)
 				);
 			};
@@ -231,14 +221,13 @@ export class IpcClient {
 					finished = true;
 					clearTimeout(timeout);
 					cleanup();
-					const msg =
-						response.error.message || "Неизвестная ошибка IPC-сервера";
-					const code = response.error.code;
-					const details = formatErrorDetails(response.error.details);
-					const fullMessage =
-						(code && code !== "" ? `${msg} (код: ${code})` : msg) + details;
-					logger.error(`IPC: ошибка сервера — ${fullMessage}`);
-					reject(new Error(fullMessage));
+					const error = new IpcError(
+						response.error.message || "Неизвестная ошибка IPC-сервера",
+						response.error.code || undefined,
+						response.error.details
+					);
+					logger.error(`IPC: ошибка сервера — ${error.message}`);
+					reject(error);
 					return;
 				}
 
@@ -248,14 +237,9 @@ export class IpcClient {
 				resolve(response.result as T);
 			});
 
-			const send = (): void => {
+			socket.connect(this.config.pipe, () => {
 				socket.write(message);
-			};
-			if (this.config.pipe) {
-				socket.connect(this.config.pipe, send);
-			} else {
-				socket.connect(this.config.port, this.config.host, send);
-			}
+			});
 		});
 	}
 
