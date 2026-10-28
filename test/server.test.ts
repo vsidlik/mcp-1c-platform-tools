@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer, CommandGateway } from "../src/server.js";
+import { createMcpServer, CommandGateway, WINDOW_CHANNEL_UNAVAILABLE_HINT } from "../src/server.js";
 import type { CommandDescriptor } from "../src/ipcClient.js";
 import { commandIdToToolName } from "../src/toolName.js";
 
@@ -71,8 +71,8 @@ const DESCRIPTORS: CommandDescriptor[] = [
 ];
 
 /** Поднимает сервер с подделкой шлюза и подключает к нему клиента MCP. */
-async function connect(gateway: CommandGateway): Promise<Client> {
-	const server = await createMcpServer(gateway, "1.2.3");
+async function connect(gateway: CommandGateway, unavailableHint?: string): Promise<Client> {
+	const server = await createMcpServer(gateway, "1.2.3", unavailableHint);
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 	const client = new Client({ name: "test", version: "1" });
 	await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -275,6 +275,21 @@ describe("createMcpServer", () => {
 
 		assert.deepStrictEqual(tools.map((tool) => tool.name), ["onec_platform_tools_status"]);
 		await client.close();
+	});
+
+	it("заглушка подсказывает, что делать, по каналу подключения", async () => {
+		const tcp = await connect(new FakeGateway(DESCRIPTORS, undefined, 99));
+		const tcpAnswer = await tcp.callTool({ name: "onec_platform_tools_status", arguments: {} });
+		assert.strictEqual(tcpAnswer.isError, true);
+		assert.match(JSON.stringify(tcpAnswer.content), /ipc\.enabled/);
+		await tcp.close();
+
+		const window = await connect(new FakeGateway(DESCRIPTORS, undefined, 99), WINDOW_CHANNEL_UNAVAILABLE_HINT);
+		const windowAnswer = await window.callTool({ name: "onec_platform_tools_status", arguments: {} });
+		assert.strictEqual(windowAnswer.isError, true);
+		assert.match(JSON.stringify(windowAnswer.content), /перезапустите MCP-сервер/);
+		assert.doesNotMatch(JSON.stringify(windowAnswer.content), /ipc\.enabled/);
+		await window.close();
 	});
 
 	it("заглушка регистрирует инструменты после повторного подключения", async () => {

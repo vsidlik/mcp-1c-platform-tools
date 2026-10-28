@@ -1,6 +1,8 @@
 /**
- * TCP-клиент к IPC-серверу расширения 1c-platform-tools (JSON-RPC over newline-delimited JSON).
- * Используется standalone MCP-процессом для listCommands и executeCommand.
+ * Клиент IPC-сервера расширения 1c-platform-tools (JSON-RPC over newline-delimited JSON).
+ * Подключается к каналу окна (именованный канал или Unix-сокет из ONEC_IPC_PIPE),
+ * а без него — к TCP-каналу. Используется standalone MCP-процессом для listCommands
+ * и executeCommand.
  */
 import * as net from "node:net";
 import { StringDecoder } from "node:string_decoder";
@@ -46,10 +48,12 @@ function formatErrorDetails(details: unknown): string {
 	}
 }
 
-/** Настройки подключения к IPC-серверу (хост, порт, токен, таймаут). */
+/** Настройки подключения к IPC-серверу (канал окна или хост и порт, токен, таймаут). */
 export interface IpcClientConfig {
 	host: string;
 	port: number;
+	/** Путь канала окна; если задан, хост и порт не используются. */
+	pipe?: string;
 	token: string | null;
 	timeoutMs: number;
 }
@@ -74,11 +78,13 @@ interface IpcResponsePayload {
 }
 
 /**
- * Клиент для вызова методов расширения 1c-platform-tools по TCP (IPC).
- * Параметры по умолчанию берутся из env: ONEC_IPC_HOST, ONEC_IPC_PORT, ONEC_IPC_TOKEN.
+ * Клиент для вызова методов расширения 1c-platform-tools по IPC.
+ * Параметры по умолчанию берутся из env: ONEC_IPC_PIPE, ONEC_IPC_HOST, ONEC_IPC_PORT, ONEC_IPC_TOKEN.
  */
 export class IpcClient {
 	private readonly config: IpcClientConfig;
+	/** Куда идут запросы: путь канала окна или хост и порт. */
+	private readonly target: string;
 
 	/**
 	 * Создаёт клиент с переданной конфигурацией или значениями из переменных окружения.
@@ -96,12 +102,15 @@ export class IpcClient {
 		} else {
 			port = 40241;
 		}
+		const pipeEnv = process.env.ONEC_IPC_PIPE?.trim();
 		this.config = {
 			host: config?.host ?? process.env.ONEC_IPC_HOST ?? "127.0.0.1",
 			port,
+			pipe: config?.pipe ?? (pipeEnv || undefined),
 			token: config?.token ?? process.env.ONEC_IPC_TOKEN ?? null,
 			timeoutMs: config?.timeoutMs ?? 60_000,
 		};
+		this.target = this.config.pipe ?? `${this.config.host}:${this.config.port}`;
 	}
 
 	/**
@@ -130,7 +139,7 @@ export class IpcClient {
 
 		const message = `${JSON.stringify(payload)}\n`;
 		const effectiveTimeout = timeoutMs ?? this.config.timeoutMs;
-		logger.debug(`IPC: запрос ${method} (id ${id}) → ${this.config.host}:${this.config.port} (таймаут ${effectiveTimeout} мс)`);
+		logger.debug(`IPC: запрос ${method} (id ${id}) → ${this.target} (таймаут ${effectiveTimeout} мс)`);
 
 		return new Promise<T>((resolve, reject) => {
 			const socket = new net.Socket();
@@ -153,7 +162,7 @@ export class IpcClient {
 					error instanceof Error
 						? error
 						: new Error("Неизвестная ошибка IPC-клиента");
-				logger.error(`IPC: подключение ${this.config.host}:${this.config.port} — ${err.message}`);
+				logger.error(`IPC: подключение ${this.target} — ${err.message}`);
 				reject(
 					new Error(
 						`Не удалось подключиться к расширению 1c-platform-tools по IPC: ${err.message}`
@@ -239,9 +248,14 @@ export class IpcClient {
 				resolve(response.result as T);
 			});
 
-			socket.connect(this.config.port, this.config.host, () => {
+			const send = (): void => {
 				socket.write(message);
-			});
+			};
+			if (this.config.pipe) {
+				socket.connect(this.config.pipe, send);
+			} else {
+				socket.connect(this.config.port, this.config.host, send);
+			}
 		});
 	}
 

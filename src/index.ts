@@ -5,7 +5,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { IpcClient } from "./ipcClient.js";
 import { logger } from "./loggerServer.js";
-import { createMcpServer } from "./server.js";
+import { createMcpServer, TCP_UNAVAILABLE_HINT, WINDOW_CHANNEL_UNAVAILABLE_HINT } from "./server.js";
 
 /**
  * Возвращает версию MCP-сервера из переменной окружения или «0.0.0».
@@ -20,7 +20,9 @@ function getServerVersion(): string {
  * Поднимает сервер и подключает stdio-транспорт.
  */
 async function main(): Promise<void> {
-	const server = await createMcpServer(new IpcClient(), getServerVersion());
+	// Канал окна передаёт VS Code, TCP-канал включают в настройках
+	const hint = process.env.ONEC_IPC_PIPE?.trim() ? WINDOW_CHANNEL_UNAVAILABLE_HINT : TCP_UNAVAILABLE_HINT;
+	const server = await createMcpServer(new IpcClient(), getServerVersion(), hint);
 	await server.connect(new StdioServerTransport());
 	logger.info("MCP-сервер 1C Platform Tools запущен (stdio)");
 }

@@ -1,14 +1,19 @@
 /**
- * Точка входа расширения VS Code: регистрирует MCP-сервер 1C Platform Tools (stdio).
- * Настройки IPC (порт, токен) передаются в процесс MCP через переменные окружения.
+ * Точка входа расширения VS Code: регистрирует MCP-сервер 1C Platform Tools (stdio)
+ * и подключает его к каналу своего окна: адрес и токен канала уходят процессу MCP
+ * переменными окружения.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { logger } from "./logger.js";
 import { writeCursorConfig, CursorServerConfig } from "./cursorConfig.js";
+import { hasWindowChannel, windowChannelEnv, type PlatformToolsApi } from "./windowChannel.js";
 
 const MCP_PROVIDER_ID = "mcp-1c-platform-tools";
+
+/** Расширение, к командам которого сервер даёт доступ. */
+const PLATFORM_TOOLS_ID = "yellow-hammer.1c-platform-tools";
 
 /**
  * Активирует расширение: регистрирует провайдер определений MCP-сервера и подписывается на очистку логгера.
@@ -29,10 +34,13 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 	(server as { cwd?: vscode.Uri }).cwd = vscode.Uri.file(context.extensionPath);
 
+	const provider: vscode.McpServerDefinitionProvider<vscode.McpStdioServerDefinition> = {
+		provideMcpServerDefinitions: async () => [server],
+		resolveMcpServerDefinition: async (definition) => connectToWindow(definition),
+	};
+
 	context.subscriptions.push(
-		vscode.lm.registerMcpServerDefinitionProvider(MCP_PROVIDER_ID, {
-			provideMcpServerDefinitions: async () => [server],
-		}),
+		vscode.lm.registerMcpServerDefinitionProvider(MCP_PROVIDER_ID, provider),
 		vscode.commands.registerCommand("mcp-1c-platform-tools.configureCursor", () =>
 			configureCursor(serverPath, false)
 		),
@@ -47,13 +55,75 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 /**
- * Предлагает включить IPC, без которого сервер не видит расширение 1c-platform-tools.
+ * API 1C: Platform Tools с каналом окна.
  *
+ * @returns API либо undefined, если у расширения прошлой версии канала окна нет
+ */
+async function platformToolsApi(): Promise<PlatformToolsApi | undefined> {
+	const extension = vscode.extensions.getExtension(PLATFORM_TOOLS_ID);
+	if (!extension) {
+		return undefined;
+	}
+	try {
+		const api: unknown = await extension.activate();
+		return hasWindowChannel(api) ? api : undefined;
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		logger.warn(`1C: Platform Tools не активировалось: ${message}`);
+		return undefined;
+	}
+}
+
+/**
+ * Подключает запускаемый MCP-сервер к каналу своего окна.
+ *
+ * Канал у каждого окна свой, поэтому агент работает с проектом окна, в котором
+ * запущен, и порт настраивать не нужно. Адрес и токен уходят в копию
+ * определения: токен сессии не остаётся в определении, которое отдаёт провайдер.
+ *
+ * @param definition — определение сервера от провайдера
+ * @returns определение с адресом канала
+ * @throws если канал окна недоступен: текст ошибки редактор показывает вместо
+ *   молча остановленного сервера
+ */
+async function connectToWindow(
+	definition: vscode.McpStdioServerDefinition
+): Promise<vscode.McpStdioServerDefinition> {
+	const api = await platformToolsApi();
+	if (!api) {
+		// Расширения обновляются независимо: у 1C: Platform Tools прошлой версии
+		// канала окна нет, и сервер идёт в TCP-канал, как раньше
+		return definition;
+	}
+	const env = await windowChannelEnv(api);
+	if (!env) {
+		const message =
+			"Канал окна 1C: Platform Tools недоступен, причина в журнале 1C: Platform Tools. " +
+			"Перезапустите MCP-сервер.";
+		logger.warn(message);
+		throw new Error(message);
+	}
+	const resolved = new vscode.McpStdioServerDefinition(
+		definition.label,
+		definition.command,
+		definition.args,
+		{ ...definition.env, ...env },
+		definition.version
+	);
+	resolved.cwd = definition.cwd;
+	return resolved;
+}
+
+/**
+ * Предлагает включить TCP-канал, без которого сервер не видит расширение 1c-platform-tools.
+ *
+ * Нужен он, только если расширение не даёт канал окна: тогда MCP-сервер VS Code
+ * идёт в TCP-канал. Cursor включает канал командой «Настроить MCP для Cursor».
  * Настройка чужая, поэтому при обычном запуске её не меняем молча: показываем
  * предложение с кнопкой.
  */
 async function offerIpc(): Promise<void> {
-	if (isIpcEnabled()) {
+	if (isIpcEnabled() || (await platformToolsApi())) {
 		return;
 	}
 	const enable = "Включить";
