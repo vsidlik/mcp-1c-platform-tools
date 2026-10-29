@@ -58,8 +58,20 @@ describe("readWindowRegistry", () => {
 		assert.deepStrictEqual(windows.map((window) => window.id), ["live"]);
 	});
 
+	it("недоверенное окно берётся без канала", async () => {
+		registerWindow(dir, { id: "locked", pipe: "", token: "", folders: ["/secret"], trusted: false });
+
+		const { windows } = await readWindowRegistry(dir);
+
+		assert.deepStrictEqual(
+			windows.map((window) => window.id),
+			["locked"]
+		);
+		assert.strictEqual(windows[0]?.trusted, false);
+	});
+
 	it("окно без сокета не берётся", { skip: process.platform === "win32" }, async () => {
-		registerWindow(dir, { id: "gone", pipe: path.join(os.tmpdir(), "mcp-1cpt-нет", "ipc.sock"), folders: ["/work/erp"] });
+		registerWindow(dir, { id: "gone", pipe: path.join(os.tmpdir(), "mcp-1cpt-нет", "channel.sock"), folders: ["/work/erp"] });
 
 		assert.deepStrictEqual((await readWindowRegistry(dir)).windows, []);
 	});

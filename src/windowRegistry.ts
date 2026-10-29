@@ -27,6 +27,8 @@ export interface RegisteredWindow {
 	pipe: string;
 	/** Токен канала окна. */
 	token: string;
+	/** false: папке не доверяют, канала нет, команды агента не выполняются. */
+	trusted: boolean;
 	/** Папки рабочей области. */
 	folders: string[];
 	/** Проекты окна: каталоги с packagedef. */
@@ -106,6 +108,7 @@ function parseRecord(text: string): ParsedRecord {
 		typeof record.name === "string" &&
 		typeof record.pipe === "string" &&
 		typeof record.token === "string" &&
+		typeof record.trusted === "boolean" &&
 		isStringList(record.folders) &&
 		isStringList(record.projects) &&
 		(record.currentProject === undefined || typeof record.currentProject === "string") &&
@@ -121,6 +124,7 @@ function parseRecord(text: string): ParsedRecord {
 			name: record.name as string,
 			pipe: record.pipe as string,
 			token: record.token as string,
+			trusted: record.trusted as boolean,
 			folders: record.folders as string[],
 			projects: record.projects as string[],
 			currentProject: record.currentProject as string | undefined,
@@ -163,8 +167,17 @@ export async function readWindowRegistry(
 			continue;
 		}
 		const { window } = parsed;
+		if (!isAlive(window.pid)) {
+			continue;
+		}
+		// Недоверенная папка записана без канала: её нужно видеть, чтобы не
+		// принять агента из неё за агента вне окон.
+		if (!window.trusted) {
+			windows.push(window);
+			continue;
+		}
 		// Именованный канал Windows исчезает вместе с процессом, Unix-сокет остаётся файлом
-		if (isAlive(window.pid) && (process.platform === "win32" || existsSync(window.pipe))) {
+		if (process.platform === "win32" || existsSync(window.pipe)) {
 			windows.push(window);
 		}
 	}

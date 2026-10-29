@@ -41,7 +41,7 @@ function writeServers(root: string, file: string, servers: Record<string, unknow
 }
 
 describe("agentConfig", () => {
-	it("Cursor: запись включает сервер и называет папку окна, порта и токена нет", async () => {
+	it("Cursor: запись включает сервер, папки проекта в ней нет", async () => {
 		const root = tempProject();
 		const outcome = await writeAgentConfig(CURSOR, { serverPath: SERVER_PATH, workspace: root });
 
@@ -49,7 +49,7 @@ describe("agentConfig", () => {
 		const entry = readServers(root, path.join(".cursor", "mcp.json"))[SERVER_NAME];
 		assert.strictEqual(entry.disabled, false);
 		assert.deepStrictEqual(entry.args, [SERVER_PATH]);
-		assert.deepStrictEqual(entry.env, { MCP_1C_WORKSPACE: root.replaceAll("\\", "/") });
+		assert.strictEqual("env" in entry, false);
 	});
 
 	it("Claude Code: .mcp.json в корне папки, без поля disabled", async () => {
@@ -60,7 +60,7 @@ describe("agentConfig", () => {
 		const entry = readServers(root, ".mcp.json")[SERVER_NAME];
 		assert.strictEqual("disabled" in entry, false);
 		assert.deepStrictEqual(entry.args, [SERVER_PATH]);
-		assert.strictEqual(entry.env.MCP_1C_WORKSPACE, root.replaceAll("\\", "/"));
+		assert.strictEqual("env" in entry, false);
 	});
 
 	it("обновляет запись прошлой версии: новый путь, без порта, настройки сервера сохраняются", async () => {
@@ -72,7 +72,12 @@ describe("agentConfig", () => {
 				disabled: false,
 				command: "node",
 				args: [OLD_SERVER_PATH],
-				env: { ONEC_IPC_HOST: "127.0.0.1", ONEC_IPC_PORT: "40242", ONEC_IPC_TOKEN: "", MCP_1C_WAIT_TIMEOUT_MS: "3600000" },
+				env: {
+					ONEC_IPC_HOST: "127.0.0.1",
+					ONEC_IPC_PORT: "40242",
+					ONEC_IPC_TOKEN: "",
+					MCP_1C_WAIT_TIMEOUT_MS: "3600000",
+				},
 			},
 		});
 
@@ -83,7 +88,6 @@ describe("agentConfig", () => {
 		assert.deepStrictEqual(servers[SERVER_NAME].args, [SERVER_PATH]);
 		assert.deepStrictEqual(servers[SERVER_NAME].env, {
 			MCP_1C_WAIT_TIMEOUT_MS: "3600000",
-			MCP_1C_WORKSPACE: root.replaceAll("\\", "/"),
 		});
 		assert.deepStrictEqual(servers["other-server"].args, ["other.js"], "чужой сервер сохранён");
 	});
@@ -108,16 +112,14 @@ describe("agentConfig", () => {
 		}
 	});
 
-	it("isStaleExtensionEntry: запись этого расширения с другой установкой или папкой", () => {
+	it("isStaleExtensionEntry: запись этого расширения с другой установкой", () => {
 		const config = { serverPath: SERVER_PATH, workspace: "C:/work/erp" };
 		const actual = buildServerEntry(CURSOR, config);
 		const otherInstall = buildServerEntry(CURSOR, { ...config, serverPath: OLD_SERVER_PATH });
-		const otherFolder = buildServerEntry(CURSOR, { ...config, workspace: "C:/work/old-erp" });
 		const foreign = { command: "node", args: ["D:/dev/mcp/out/src/index.js"] };
 
 		assert.strictEqual(isStaleExtensionEntry(actual, config), false);
 		assert.strictEqual(isStaleExtensionEntry(otherInstall, config), true);
-		assert.strictEqual(isStaleExtensionEntry(otherFolder, config), true);
 		assert.strictEqual(isStaleExtensionEntry(foreign, config), false);
 		assert.strictEqual(isStaleExtensionEntry(undefined, config), false);
 	});

@@ -5,7 +5,8 @@
  * открыть заново или открыть в нём другой проект.
  */
 import * as path from "node:path";
-import { IpcClient, IpcError, type CommandDescriptor } from "./ipcClient.js";
+import type { CommandDescriptor } from "./commandDescriptor.js";
+import { ChannelClient, ChannelError } from "./channelClient.js";
 import type { CommandGateway } from "./server.js";
 import {
 	agentWindow,
@@ -32,13 +33,15 @@ export interface WindowGatewayOptions {
  * @param refusal — отказ
  * @returns ошибка с текстом для агента
  */
-function refusalError(refusal: WindowRefusal): IpcError {
-	return new IpcError(refusal.message, refusal.code, refusal.details);
+function refusalError(refusal: WindowRefusal): ChannelError {
+	return new ChannelError(refusal.message, refusal.code, refusal.details);
 }
 
 /** Самое свежее окно: из него берётся список команд, когда агент запущен вне окон. */
 function newest(windows: readonly RegisteredWindow[]): RegisteredWindow | undefined {
-	return [...windows].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+	return [...windows]
+		.filter((window) => window.trusted)
+		.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
 }
 
 /** Шлюз команд к окнам 1C: Platform Tools. */
@@ -71,7 +74,7 @@ export class WindowGateway implements CommandGateway {
 		if (!window) {
 			throw refusalError(noWindows(snapshot));
 		}
-		return new IpcClient({ pipe: window.pipe, token: window.token }).listCommandDescriptors();
+		return new ChannelClient({ pipe: window.pipe, token: window.token }).listCommandDescriptors();
 	}
 
 	/**
@@ -94,11 +97,11 @@ export class WindowGateway implements CommandGateway {
 		if ("refusal" in choice) {
 			throw refusalError(choice.refusal);
 		}
-		const client = new IpcClient({ pipe: choice.window.pipe, token: choice.window.token });
+		const client = new ChannelClient({ pipe: choice.window.pipe, token: choice.window.token });
 		try {
 			return await client.executeCommand(commandId, args, choice.projectPath, timeoutMs);
 		} catch (err) {
-			if (err instanceof IpcError && err.code === "WORKSPACE_MISMATCH") {
+			if (err instanceof ChannelError && err.code === "WORKSPACE_MISMATCH") {
 				throw withOtherWindows(err, snapshot, choice.window, projectPath);
 			}
 			throw err;
@@ -116,11 +119,11 @@ export class WindowGateway implements CommandGateway {
  * @returns отказ с подсказкой
  */
 function withOtherWindows(
-	err: IpcError,
+	err: ChannelError,
 	snapshot: WindowRegistrySnapshot,
 	own: RegisteredWindow,
 	projectPath: string | undefined
-): IpcError {
+): ChannelError {
 	const resolved = (err.details as { projectPath?: unknown } | undefined)?.projectPath;
 	const target = typeof resolved === "string" ? resolved : projectPath;
 	if (target === undefined || !path.isAbsolute(target)) {
@@ -131,5 +134,5 @@ function withOtherWindows(
 		others.length > 0
 			? ` Проект открыт в другом окне: ${describeWindows(others)}. Агент работает с окном, из которого запущен: продолжите в том окне`
 			: " Проект не открыт ни в одном окне VS Code или Cursor с 1C: Platform Tools";
-	return new IpcError(`${err.reason}.${hint}`, err.code, err.details);
+	return new ChannelError(`${err.reason}.${hint}`, err.code, err.details);
 }

@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { logger } from "./logger.js";
+import { notifyQuiet } from "./notify.js";
 import { CLAUDE_CODE, CURSOR, writeAgentConfig, type AgentConfigTarget } from "./agentConfig.js";
 import { hasMcpWindow, type PlatformToolsApi } from "./platformToolsApi.js";
 
@@ -46,9 +47,6 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.lm.registerMcpServerDefinitionProvider(MCP_PROVIDER_ID, provider),
 		vscode.commands.registerCommand("mcp-1c-platform-tools.configureCursor", () =>
 			configureAgent(CURSOR, serverPath, false)
-		),
-		vscode.commands.registerCommand("mcp-1c-platform-tools.configureClaudeCode", () =>
-			configureAgent(CLAUDE_CODE, serverPath, false)
 		),
 		{ dispose: () => logger.dispose() }
 	);
@@ -154,12 +152,11 @@ async function configureAgent(target: AgentConfigTarget, serverPath: string, onl
 			if (outcome === "unchanged") {
 				continue;
 			}
-			logger.info(`Конфиг ${target.label} ${outcome === "created" ? "создан" : "обновлён"}: ${file}`);
-			void vscode.window.showInformationMessage(
-				onlyIfStale
-					? `Обновлена запись MCP-сервера в ${file}. ${target.afterUpdate}`
-					: `Конфиг MCP для ${target.label} записан в ${file}. ${target.afterCreate}`
-			);
+			const done = onlyIfStale
+				? `Обновлена запись MCP-сервера в ${file}`
+				: `Конфиг MCP для ${target.label} записан в ${file}`;
+			notifyQuiet(done);
+			logger.info(onlyIfStale ? target.afterUpdate : target.afterCreate);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			logger.error(`Не удалось записать конфиг ${target.label} (${file}): ${message}`);

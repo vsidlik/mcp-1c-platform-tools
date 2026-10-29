@@ -15,20 +15,20 @@ import { windowRegistryDir } from "../src/windowRegistry.js";
 import { registerWindow, startChannel, type FakeChannel } from "./helpers/fakeWindow.js";
 
 const SERVER = fileURLToPath(new URL("../src/index.js", import.meta.url));
-const ERP = path.resolve("/work/erp");
 
 /**
  * Запускает сервер с домашним каталогом и папкой агента.
  *
  * @param home — домашний каталог с реестром окон
- * @param workspace — значение MCP_1C_WORKSPACE
+ * @param folder — каталог, из которого запускается сервер
  * @returns подключённый клиент MCP
  */
-async function startServer(home: string, workspace: string): Promise<Client> {
+async function startServer(home: string, folder: string): Promise<Client> {
 	const transport = new StdioClientTransport({
 		command: process.execPath,
 		args: [SERVER],
-		env: { HOME: home, USERPROFILE: home, MCP_1C_WORKSPACE: workspace, MCP_1C_LOG_LEVEL: "error" },
+		cwd: folder,
+		env: { HOME: home, USERPROFILE: home, MCP_1C_LOG_LEVEL: "error", MCP_1C_WINDOW_WAIT_MS: "0" },
 		stderr: "ignore",
 	});
 	const client = new Client({ name: "test", version: "1" });
@@ -38,10 +38,12 @@ async function startServer(home: string, workspace: string): Promise<Client> {
 
 describe("сервер из конфига клиента", () => {
 	let home: string;
+	let project: string;
 	let channel: FakeChannel;
 
 	before(async () => {
 		home = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-home-"));
+		project = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-project-"));
 		channel = await startChannel((request) =>
 			request.method === "listCommands"
 				? { result: { descriptors: [{ id: "1c-platform-tools.env.status", title: "Состояние окружения", supportsWait: true }] } }
@@ -52,10 +54,11 @@ describe("сервер из конфига клиента", () => {
 	after(async () => {
 		await channel.close();
 		fs.rmSync(home, { recursive: true, force: true });
+		fs.rmSync(project, { recursive: true, force: true });
 	});
 
 	it("без окна с проектом вместо инструментов заглушка с причиной", async () => {
-		const client = await startServer(home, ERP);
+		const client = await startServer(home, project);
 		try {
 			const { tools } = await client.listTools();
 			assert.deepStrictEqual(tools.map((tool) => tool.name), ["onec_platform_tools_status"]);
@@ -68,12 +71,12 @@ describe("сервер из конфига клиента", () => {
 		}
 	});
 
-	it("находит окно по папке из конфига и выполняет команду в нём", async () => {
-		registerWindow(windowRegistryDir(home), { id: "erp", pipe: channel.pipe, folders: [ERP] });
-		const client = await startServer(home, ERP);
+	it("находит окно по каталогу запуска и выполняет команду в нём", async () => {
+		registerWindow(windowRegistryDir(home), { id: "erp", pipe: channel.pipe, folders: [project] });
+		const client = await startServer(home, project);
 		try {
 			const { tools } = await client.listTools();
-			assert.deepStrictEqual(tools.map((tool) => tool.name), ["env_status"]);
+			assert.deepStrictEqual(tools.map((tool) => tool.name).sort(), ["env_status", "onec_platform_tools_status"]);
 
 			const answer = await client.callTool({ name: "env_status", arguments: {} });
 			assert.notStrictEqual(answer.isError, true);

@@ -2,8 +2,8 @@
  * Конфиг MCP в проекте для клиентов, которые не берут сервер у провайдера
  * MCP-серверов VS Code: Cursor (`.cursor/mcp.json`) и Claude Code (`.mcp.json`).
  *
- * Запись называет папку рабочей области: по ней сервер находит окно. Путь к
- * расширению содержит его версию, поэтому после обновления конфиг указывает на
+ * Запись называет путь к серверу. Каталог, из которого клиент его запускает,
+ * указывает окно. Путь к расширению содержит его версию, поэтому после обновления конфиг указывает на
  * несуществующий каталог и сервер падает с MODULE_NOT_FOUND. Модуль пишет
  * актуальный путь и чинит устаревший при запуске.
  */
@@ -15,9 +15,6 @@ export const SERVER_NAME = "mcp-1c-platform-tools";
 
 /** Признак записи, созданной этим расширением: каталог установленного расширения. */
 const EXTENSION_DIR_MARKER = "yellow-hammer.mcp-1c-platform-tools";
-
-/** Переменная, по которой сервер находит окно. */
-const WORKSPACE_ENV = "MCP_1C_WORKSPACE";
 
 /** Клиент MCP с конфигом в проекте. */
 export interface AgentConfigTarget {
@@ -86,13 +83,13 @@ export function buildServerEntry(
 		...(target.enables ? { disabled: false } : {}),
 		command: "node",
 		args: [slashes(config.serverPath)],
-		env: { ...keepEnv, [WORKSPACE_ENV]: slashes(config.workspace) },
+		...(Object.keys(keepEnv).length > 0 ? { env: keepEnv } : {}),
 	};
 }
 
 /**
  * Настройки сервера из прежней записи: таймаут ожидания, уровень журнала и
- * другие MCP_1C_*, кроме папки окна, которую запись задаёт сама.
+ * другие MCP_1C_*.
  */
 function userSettings(entry: unknown): Record<string, string> {
 	const env = (entry as { env?: unknown } | undefined)?.env;
@@ -101,14 +98,13 @@ function userSettings(entry: unknown): Record<string, string> {
 	}
 	return Object.fromEntries(
 		Object.entries(env).filter(
-			(pair): pair is [string, string] =>
-				pair[0].startsWith("MCP_1C_") && pair[0] !== WORKSPACE_ENV && typeof pair[1] === "string"
+			(pair): pair is [string, string] => pair[0].startsWith("MCP_1C_") && typeof pair[1] === "string"
 		)
 	);
 }
 
 /**
- * Указывает ли запись этого расширения на другую установку или другую папку.
+ * Указывает ли запись этого расширения на другую установку.
  *
  * Только такие записи обновляются автоматически: путь, заданный пользователем
  * вручную (например, на сборку из исходников), не трогаем.
@@ -129,8 +125,7 @@ export function isStaleExtensionEntry(entry: unknown, config: ServerConfig): boo
 	if (!current.includes(EXTENSION_DIR_MARKER)) {
 		return false;
 	}
-	const env = (entry as { env?: Record<string, unknown> }).env;
-	return current !== slashes(config.serverPath) || env?.[WORKSPACE_ENV] !== slashes(config.workspace);
+	return current !== slashes(config.serverPath);
 }
 
 /**

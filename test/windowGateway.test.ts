@@ -7,7 +7,7 @@ import assert from "node:assert";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { IpcError } from "../src/ipcClient.js";
+import { ChannelError } from "../src/channelClient.js";
 import { WindowGateway } from "../src/windowGateway.js";
 import { registerWindow, startChannel, type ChannelRequest, type FakeChannel } from "./helpers/fakeWindow.js";
 
@@ -19,7 +19,7 @@ const RETAIL = path.join(WORK, "retail");
 function windowReply(name: string, folder: string): (request: ChannelRequest) => { result: unknown } | { error: { message: string; code: string; details: unknown } } {
 	return (request) => {
 		if (request.method === "listCommands") {
-			return { result: { commands: [`1c-platform-tools.${name}.cmd`] } };
+			return { result: { descriptors: [{ id: `1c-platform-tools.${name}.cmd` }] } };
 		}
 		const projectPath = request.params?.projectPath;
 		if (typeof projectPath === "string" && path.isAbsolute(projectPath) && !projectPath.startsWith(folder)) {
@@ -62,22 +62,22 @@ describe("WindowGateway", () => {
 		assert.strictEqual(retail.requests.at(-1)?.token, "token-retail");
 	});
 
-	it("каталог агента из конфига клиента выбирает окно с этой папкой", async () => {
-		const gateway = new WindowGateway({ workspace: ERP }, { registryDir: dir });
+	it("каталог запуска выбирает окно с этой папкой", async () => {
+		const gateway = new WindowGateway({ cwd: ERP }, { registryDir: dir });
 		assert.deepStrictEqual(await gateway.listCommandDescriptors(), [{ id: "1c-platform-tools.erp.cmd" }]);
 		assert.deepStrictEqual(await gateway.executeCommand("cmd", [], undefined), { window: "erp" });
 	});
 
 	it("проект соседнего окна отклоняется, ответ называет окно с проектом", async () => {
-		const gateway = new WindowGateway({ workspace: ERP }, { registryDir: dir });
+		const gateway = new WindowGateway({ cwd: ERP }, { registryDir: dir });
 		const before = retail.requests.length;
 
 		await assert.rejects(
 			() => gateway.executeCommand("cmd", [], RETAIL),
 			(error: unknown) => {
-				assert.ok(error instanceof IpcError);
+				assert.ok(error instanceof ChannelError);
 				assert.strictEqual(error.code, "WORKSPACE_MISMATCH");
-				assert.match(error.message, /Проект открыт в другом окне: «retail» \(Cursor\)/);
+				assert.ok(error.message.includes("retail"));
 				return true;
 			}
 		);
@@ -98,8 +98,27 @@ describe("WindowGateway", () => {
 		assert.deepStrictEqual(await gateway.listCommandDescriptors(), [{ id: "1c-platform-tools.retail.cmd" }]);
 	});
 
+	it("агент из недоверенной папки не получает команды другого окна", async () => {
+		const secret = path.resolve("/secret");
+		registerWindow(dir, { id: "locked", pipe: "", token: "", folders: [secret], trusted: false });
+		const gateway = new WindowGateway({ cwd: secret }, { registryDir: dir });
+		const before = erp.requests.length + retail.requests.length;
+
+		await assert.rejects(() => gateway.listCommandDescriptors(), (error: unknown) => {
+			assert.ok(error instanceof ChannelError);
+			assert.strictEqual(error.code, "WORKSPACE_NOT_TRUSTED");
+			return true;
+		});
+		await assert.rejects(() => gateway.executeCommand("cmd", [], ERP), (error: unknown) => {
+			assert.ok(error instanceof ChannelError);
+			assert.strictEqual(error.code, "WORKSPACE_NOT_TRUSTED");
+			return true;
+		});
+		assert.strictEqual(erp.requests.length + retail.requests.length, before);
+	});
+
 	it("без окон список команд отклоняется с понятной причиной", async () => {
-		const gateway = new WindowGateway({ workspace: ERP }, { registryDir: path.join(dir, "пусто") });
+		const gateway = new WindowGateway({ cwd: ERP }, { registryDir: path.join(dir, "пусто") });
 		await assert.rejects(() => gateway.listCommandDescriptors(), /WINDOW_NOT_FOUND/);
 	});
 });

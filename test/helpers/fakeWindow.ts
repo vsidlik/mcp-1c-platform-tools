@@ -40,7 +40,7 @@ export function channelPath(): { pipe: string; dir?: string } {
 		return { pipe: `\\\\.\\pipe\\mcp-1cpt-test-${id}` };
 	}
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-1cpt-"));
-	return { pipe: path.join(dir, "ipc.sock"), dir };
+	return { pipe: path.join(dir, "channel.sock"), dir };
 }
 
 /**
@@ -105,6 +105,7 @@ export function registerWindow(
 		app: "Visual Studio Code",
 		name: path.basename(window.folders[0] ?? window.id),
 		token: `token-${window.id}`,
+		trusted: true,
 		projects: window.folders,
 		currentProject: window.folders[0],
 		updatedAt: new Date().toISOString(),

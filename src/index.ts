@@ -23,7 +23,13 @@ function getServerVersion(): string {
 async function main(): Promise<void> {
 	const gateway = new WindowGateway(agentContextFrom(process.env, process.cwd()));
 	const server = await createMcpServer(gateway, getServerVersion());
-	await server.connect(new StdioServerTransport());
+	const transport = new StdioServerTransport();
+	await server.connect(transport);
+	// Клиент закрыл канал, а процесс иначе остаётся жить рядом с новым.
+	process.stdin.on("end", () => {
+		logger.info("клиент закрыл соединение MCP-сервера");
+		process.exit(0);
+	});
 	logger.info("MCP-сервер 1C Platform Tools запущен (stdio)");
 }
 

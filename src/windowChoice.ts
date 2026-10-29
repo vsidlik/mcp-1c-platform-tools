@@ -1,8 +1,8 @@
 /**
  * Выбор окна 1C: Platform Tools для вызова инструмента.
  *
- * Окно агента — окно, из которого его запустил VS Code, окно папки из конфига
- * клиента или окно, в папке которого запущен процесс. Вызовы идут в него, а
+ * Окно агента — окно, из которого его запустил VS Code, или окно, в папке
+ * которого запущен процесс. Вызовы идут в него, а
  * проект другого окна оно отклоняет само (WORKSPACE_MISMATCH): соседнее окно
  * молча не выполняет чужое. Агент, запущенный вне окон, адресует окно путём
  * проекта. Модуль не читает файлов и не открывает каналов: решения проверяются тестами.
@@ -14,8 +14,6 @@ import type { RegisteredWindow, WindowRegistrySnapshot } from "./windowRegistry.
 export interface AgentContext {
 	/** Окно, из которого сервер запустил VS Code (MCP_1C_WINDOW). */
 	windowId?: string;
-	/** Папка проекта из конфига клиента (MCP_1C_WORKSPACE): сервер работает только с её окном. */
-	workspace?: string;
 	/** Каталог, из которого клиент запустил сервер. */
 	cwd?: string;
 }
@@ -26,7 +24,8 @@ export type WindowRefusalCode =
 	| "WINDOW_NOT_FOUND"
 	| "WINDOW_AMBIGUOUS"
 	| "PROJECT_PATH_REQUIRED"
-	| "VERSION_MISMATCH";
+	| "VERSION_MISMATCH"
+	| "WORKSPACE_NOT_TRUSTED";
 
 /** Отказ: что случилось, что сделать и какие окна открыты. */
 export interface WindowRefusal {
@@ -47,11 +46,8 @@ export type WindowChoice = { window: RegisteredWindow; projectPath?: string } | 
  */
 export function agentContextFrom(env: NodeJS.ProcessEnv, cwd: string): AgentContext {
 	const windowId = env.MCP_1C_WINDOW?.trim();
-	const workspace = env.MCP_1C_WORKSPACE?.trim();
 	return {
 		windowId: windowId || undefined,
-		// Клиент без подстановки переменных передаёт строку вроде ${workspaceFolder}: такой путь не берётся
-		workspace: workspace && path.isAbsolute(workspace) ? workspace : undefined,
 		cwd,
 	};
 }
@@ -141,6 +137,21 @@ export function noWindows(snapshot: WindowRegistrySnapshot): WindowRefusal {
 	return noWindow(snapshot, "Нет окон VS Code или Cursor с 1C: Platform Tools. Откройте проект 1С и повторите вызов");
 }
 
+/** Отказ недоверенной папки: команды не выполняются и в других окнах. */
+function untrusted(window: RegisteredWindow): WindowRefusal {
+	return {
+		code: "WORKSPACE_NOT_TRUSTED",
+		message:
+			"Папка не доверенная, агент команды не выполняет. Подтвердите доверие папке и повторите вызов.",
+		details: { windows: windowList([window]) },
+	};
+}
+
+/** Окно агента либо отказ, если папке не доверяют. */
+function agentOrUntrusted(window: RegisteredWindow): { window: RegisteredWindow } | { refusal: WindowRefusal } {
+	return window.trusted ? { window } : { refusal: untrusted(window) };
+}
+
 function ambiguous(target: string, windows: readonly RegisteredWindow[]): WindowRefusal {
 	return {
 		code: "WINDOW_AMBIGUOUS",
@@ -152,8 +163,7 @@ function ambiguous(target: string, windows: readonly RegisteredWindow[]): Window
 /**
  * Окно агента: окно, из которого его запустил VS Code, окно, в папке которого
  * лежит каталог агента, либо единственное окно с папками внутри этого каталога.
- * Окна папки из конфига клиента нет — отказ: агент этой папки с другими окнами
- * не работает.
+ * Недоверенная папка — отказ: агент из неё с другими окнами не работает.
  *
  * @param snapshot — открытые окна
  * @param context — окно и каталог агента
@@ -166,7 +176,7 @@ export function agentWindow(
 	if (context.windowId !== undefined) {
 		const window = snapshot.windows.find((candidate) => candidate.id === context.windowId);
 		if (window) {
-			return { window };
+			return agentOrUntrusted(window);
 		}
 		return {
 			refusal: {
@@ -175,7 +185,7 @@ export function agentWindow(
 			},
 		};
 	}
-	const anchor = context.workspace ?? context.cwd;
+	const anchor = context.cwd;
 	if (anchor === undefined) {
 		return {};
 	}
@@ -184,21 +194,11 @@ export function agentWindow(
 		return { refusal: ambiguous(anchor, containing) };
 	}
 	if (containing.length === 1) {
-		return { window: containing[0] };
+		return agentOrUntrusted(containing[0]);
 	}
-	// Агент запущен над проектами, например Claude Code в общем каталоге
 	const below = snapshot.windows.filter((window) => window.folders.some((folder) => isSameOrUnder(folder, anchor)));
 	if (below.length === 1) {
-		return { window: below[0] };
-	}
-	if (context.workspace !== undefined && below.length === 0) {
-		return {
-			refusal: noWindow(
-				snapshot,
-				`Папка ${context.workspace} не открыта в окнах VS Code или Cursor с 1C: Platform Tools. Откройте её и повторите вызов`,
-				{ workspace: context.workspace }
-			),
-		};
+		return agentOrUntrusted(below[0]);
 	}
 	return {};
 }
@@ -227,7 +227,7 @@ export function chooseWindow(
 	if (own.window) {
 		return { window: own.window, projectPath };
 	}
-	const workspace = context.workspace ?? context.cwd;
+	const workspace = context.cwd;
 	if (projectPath === undefined) {
 		if (snapshot.windows.length === 0) {
 			return { refusal: noWindows(snapshot) };
@@ -255,6 +255,9 @@ export function chooseWindow(
 	const found = windowsContaining(snapshot.windows, target);
 	if (found.length > 1) {
 		return { refusal: ambiguous(target, found) };
+	}
+	if (found.length === 1 && !found[0].trusted) {
+		return { refusal: untrusted(found[0]) };
 	}
 	if (found.length === 0) {
 		return {

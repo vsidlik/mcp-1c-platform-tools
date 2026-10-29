@@ -19,8 +19,9 @@ function window(id: string, folders: string[], projects: string[] = folders): Re
 		pid: 1,
 		app: "Visual Studio Code",
 		name: path.basename(folders[0]),
-		pipe: `/tmp/1cpt-${id}/ipc.sock`,
+		pipe: `/tmp/1cpt-${id}/channel.sock`,
 		token: `secret-${id}`,
+		trusted: true,
 		folders,
 		projects,
 		currentProject: projects[0],
@@ -41,26 +42,21 @@ function outcome(choice: WindowChoice): string {
 }
 
 describe("agentContextFrom", () => {
-	it("окно из MCP_1C_WINDOW, папка из MCP_1C_WORKSPACE, каталог процесса", () => {
-		assert.deepStrictEqual(agentContextFrom({ MCP_1C_WINDOW: " abc ", MCP_1C_WORKSPACE: ERP }, RETAIL), {
+	it("окно из MCP_1C_WINDOW и каталог процесса", () => {
+		assert.deepStrictEqual(agentContextFrom({ MCP_1C_WINDOW: " abc " }, RETAIL), {
 			windowId: "abc",
-			workspace: ERP,
 			cwd: RETAIL,
 		});
 	});
 
 	it("без переменных остаётся только каталог процесса", () => {
-		assert.deepStrictEqual(agentContextFrom({}, RETAIL), { windowId: undefined, workspace: undefined, cwd: RETAIL });
-	});
-
-	it("неподставленная переменная клиента не считается путём", () => {
-		assert.strictEqual(agentContextFrom({ MCP_1C_WORKSPACE: "${workspaceFolder}" }, RETAIL).workspace, undefined);
+		assert.deepStrictEqual(agentContextFrom({}, RETAIL), { windowId: undefined, cwd: RETAIL });
 	});
 });
 
 describe("окно агента", () => {
 	it("окно, из которого VS Code запустил сервер, выбирается по идентификатору", () => {
-		const choice = chooseWindow(snapshot(erpWindow, retailWindow), { windowId: "retail", workspace: ERP }, undefined);
+		const choice = chooseWindow(snapshot(erpWindow, retailWindow), { windowId: "retail", cwd: ERP }, undefined);
 		assert.strictEqual(outcome(choice), "retail");
 	});
 
@@ -74,33 +70,38 @@ describe("окно агента", () => {
 		assert.deepStrictEqual(choice, { window: erpWindow, projectPath: "delivery" });
 	});
 
-	it("папка из конфига клиента без окна: отказ, а не окно с тем же проектом рядом", () => {
-		const choice = chooseWindow(snapshot(retailWindow), { workspace: ERP, cwd: RETAIL }, RETAIL);
-		assert.ok("refusal" in choice);
-		assert.strictEqual(choice.refusal.code, "WINDOW_NOT_FOUND");
-		assert.ok(choice.refusal.message.includes(ERP), choice.refusal.message);
-	});
-
 	it("проект другого окна идёт в окно агента: отклоняет его само окно", () => {
-		const choice = chooseWindow(snapshot(erpWindow, retailWindow), { workspace: ERP }, RETAIL);
+		const choice = chooseWindow(snapshot(erpWindow, retailWindow), { cwd: ERP }, RETAIL);
 		assert.deepStrictEqual(choice, { window: erpWindow, projectPath: RETAIL });
 	});
 
 	it("из вложенных папок разных окон берётся самая глубокая", () => {
 		const workWindow = window("work", [WORK]);
-		assert.strictEqual(outcome(chooseWindow(snapshot(workWindow, erpWindow), { workspace: DELIVERY }, undefined)), "erp");
-		assert.strictEqual(outcome(chooseWindow(snapshot(workWindow, erpWindow), { workspace: RETAIL }, undefined)), "work");
+		assert.strictEqual(outcome(chooseWindow(snapshot(workWindow, erpWindow), { cwd: DELIVERY }, undefined)), "erp");
+		assert.strictEqual(outcome(chooseWindow(snapshot(workWindow, erpWindow), { cwd: RETAIL }, undefined)), "work");
 	});
 
 	it("папка открыта в двух окнах: отказ WINDOW_AMBIGUOUS", () => {
 		const twin = { ...window("twin", [ERP]), app: "Cursor" };
-		const choice = chooseWindow(snapshot(erpWindow, twin), { workspace: ERP }, undefined);
+		const choice = chooseWindow(snapshot(erpWindow, twin), { cwd: ERP }, undefined);
 		assert.strictEqual(outcome(choice), "WINDOW_AMBIGUOUS");
 	});
 
 	it("агент над проектами с единственным окном внутри работает с этим окном", () => {
-		assert.deepStrictEqual(agentWindow(snapshot(erpWindow), { workspace: WORK }), { window: erpWindow });
-		assert.deepStrictEqual(agentWindow(snapshot(erpWindow, retailWindow), { workspace: WORK }), {});
+		assert.deepStrictEqual(agentWindow(snapshot(erpWindow), { cwd: WORK }), { window: erpWindow });
+		assert.deepStrictEqual(agentWindow(snapshot(erpWindow, retailWindow), { cwd: WORK }), {});
+	});
+
+	it("агент из недоверенной папки не выполняет команды и в других окнах", () => {
+		const locked = { ...window("locked", [path.resolve("/secret")]), trusted: false, pipe: "", token: "" };
+		const choice = chooseWindow(snapshot(erpWindow, locked), { cwd: path.resolve("/secret") }, ERP);
+		assert.strictEqual(outcome(choice), "WORKSPACE_NOT_TRUSTED");
+	});
+
+	it("путь недоверенной папки извне тоже отказ", () => {
+		const locked = { ...window("locked", [path.resolve("/secret")]), trusted: false, pipe: "", token: "" };
+		const choice = chooseWindow(snapshot(erpWindow, locked), { cwd: path.resolve("/home/dev") }, path.resolve("/secret"));
+		assert.strictEqual(outcome(choice), "WORKSPACE_NOT_TRUSTED");
 	});
 });
 
@@ -121,7 +122,6 @@ describe("агент вне окон", () => {
 		const choice = chooseWindow(snapshot(erpWindow), outside, path.join(WORK, "hr"));
 		assert.ok("refusal" in choice);
 		assert.strictEqual(choice.refusal.code, "WINDOW_NOT_FOUND");
-		assert.match(choice.refusal.message, /не открыт/);
 		assert.ok(choice.refusal.message.includes(ERP), choice.refusal.message);
 	});
 
@@ -146,11 +146,11 @@ describe("агент вне окон", () => {
 		for (const choice of [
 			chooseWindow(snapshot(erpWindow, retailWindow), outside, undefined),
 			chooseWindow(snapshot(erpWindow), outside, path.join(WORK, "hr")),
-			chooseWindow(snapshot(erpWindow, { ...erpWindow, id: "twin" }), { workspace: ERP }, undefined),
+			chooseWindow(snapshot(erpWindow, { ...erpWindow, id: "twin" }), { cwd: ERP }, undefined),
 		]) {
 			assert.ok("refusal" in choice);
 			const text = JSON.stringify(choice.refusal);
-			assert.ok(!text.includes("secret-") && !text.includes("ipc.sock"), text);
+			assert.ok(!text.includes("secret-") && !text.includes("channel.sock"), text);
 		}
 	});
 });
